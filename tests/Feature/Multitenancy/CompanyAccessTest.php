@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Multitenancy;
 
+use App\Models\Branch;
 use App\Models\Company;
 use App\Models\Tenant;
 use App\Models\User;
@@ -20,16 +21,12 @@ class CompanyAccessTest extends TestCase
         $tenant = $this->createTenant('Tenant A', 'tenant-a');
         $tenant->makeCurrent();
         $user = User::factory()->create(['tenant_id' => $tenant->id]);
-        $headquarters = Company::create(['trade_name' => 'Matriz A']);
-        $branch = Company::create([
-            'trade_name' => 'Filial A',
-            'type' => 'branch',
-            'parent_id' => $headquarters->id,
-        ]);
+        $headquarters = Company::create(['tenant_id' => $tenant->id, 'trade_name' => 'Matriz A']);
+        $branch = Branch::factory()->create(['company_id' => $headquarters->id, 'name' => 'Filial A']);
 
         $service = app(CompanyAccessService::class);
         $service->grant($user, $headquarters, true);
-        $service->grant($user, $branch);
+        $branch->users()->attach($user->id, ['tenant_id' => $tenant->id]);
 
         $this->assertDatabaseHas('company_user', [
             'tenant_id' => $tenant->id,
@@ -37,7 +34,8 @@ class CompanyAccessTest extends TestCase
             'company_id' => $headquarters->id,
             'is_default' => true,
         ]);
-        $this->assertCount(2, $user->fresh()->companies);
+        $this->assertCount(1, $user->fresh()->companies);
+        $this->assertCount(1, $user->fresh()->branches);
         $this->assertSame($headquarters->id, $user->fresh()->defaultCompany()?->id);
     }
 
@@ -48,7 +46,7 @@ class CompanyAccessTest extends TestCase
         $tenantA->makeCurrent();
         $user = User::factory()->create(['tenant_id' => $tenantA->id]);
         $tenantB->makeCurrent();
-        $company = Company::create(['trade_name' => 'Empresa B']);
+        $company = Company::create(['tenant_id' => $tenantB->id, 'trade_name' => 'Empresa B']);
         $tenantA->makeCurrent();
 
         $this->expectException(LogicException::class);
@@ -61,7 +59,7 @@ class CompanyAccessTest extends TestCase
         $tenant = $this->createTenant('Tenant A', 'tenant-a');
         $tenant->makeCurrent();
         $user = User::factory()->create(['tenant_id' => $tenant->id]);
-        $company = Company::create(['trade_name' => 'Empresa A']);
+        $company = Company::create(['tenant_id' => $tenant->id, 'trade_name' => 'Empresa A']);
         app(CompanyAccessService::class)->grant($user, $company);
 
         app(CurrentCompany::class)->set($user, $company);

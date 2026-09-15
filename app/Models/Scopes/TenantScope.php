@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Scope;
 use LogicException;
 
+/** @implements Scope<Model> */
 class TenantScope implements Scope
 {
     public function apply(Builder $builder, Model $model): void

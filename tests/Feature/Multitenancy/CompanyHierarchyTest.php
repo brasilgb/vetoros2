@@ -2,7 +2,7 @@
 
 namespace Tests\Feature\Multitenancy;
 
-use App\Enums\CompanyType;
+use App\Models\Branch;
 use App\Models\Company;
 use App\Models\Tenant;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -17,21 +17,22 @@ class CompanyHierarchyTest extends TestCase
     {
         $tenant = $this->createTenant('Tenant A', 'tenant-a');
         $tenant->makeCurrent();
-        $headquarters = Company::create(['trade_name' => 'Matriz A']);
+        $headquarters = Company::create(['tenant_id' => $tenant->id, 'trade_name' => 'Matriz A']);
 
-        $branch = Company::factory()->branch($headquarters)->create([
-            'trade_name' => 'Filial A',
+        $branch = Branch::factory()->create([
+            'company_id' => $headquarters->id,
+            'name' => 'Filial A',
         ]);
 
-        $this->assertSame($headquarters->id, $branch->parent_id);
-        $this->assertCount(1, $headquarters->branches);
+        $this->assertSame($headquarters->id, $branch->company_id);
+        $this->assertCount(1, $headquarters->operationalBranches);
     }
 
     public function test_headquarters_cannot_have_a_parent(): void
     {
         $tenant = $this->createTenant('Tenant A', 'tenant-a');
         $tenant->makeCurrent();
-        $headquarters = Company::create(['trade_name' => 'Matriz A']);
+        $headquarters = Company::create(['tenant_id' => $tenant->id, 'trade_name' => 'Matriz A']);
 
         $this->expectException(LogicException::class);
 
@@ -41,24 +42,16 @@ class CompanyHierarchyTest extends TestCase
         ]);
     }
 
-    public function test_branch_cannot_point_to_another_branch(): void
+    public function test_branch_must_point_to_a_headquarters(): void
     {
         $tenant = $this->createTenant('Tenant A', 'tenant-a');
         $tenant->makeCurrent();
-        $headquarters = Company::create(['trade_name' => 'Matriz A']);
-        $branch = Company::create([
-            'trade_name' => 'Filial A',
-            'type' => CompanyType::BRANCH,
-            'parent_id' => $headquarters->id,
-        ]);
+        $headquarters = Company::create(['tenant_id' => $tenant->id, 'trade_name' => 'Matriz A']);
+        $branch = Branch::factory()->create(['company_id' => $headquarters->id]);
 
         $this->expectException(LogicException::class);
 
-        Company::create([
-            'trade_name' => 'Filial de filial',
-            'type' => CompanyType::BRANCH,
-            'parent_id' => $branch->id,
-        ]);
+        Branch::create(['name' => 'Filial de filial', 'company_id' => $branch->id]);
     }
 
     private function createTenant(string $name, string $slug): Tenant

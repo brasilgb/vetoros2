@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Illuminate\Support\Carbon;
@@ -77,11 +78,31 @@ class User extends Authenticatable
             ->withTimestamps();
     }
 
+    /** @return BelongsToMany<Branch, $this> */
+    public function branches(): BelongsToMany
+    {
+        return $this->belongsToMany(Branch::class, 'branch_user')
+            ->withPivot('tenant_id')
+            ->withTimestamps();
+    }
+
     public function defaultCompany(): ?Company
     {
         return $this->companies()
             ->wherePivot('is_default', true)
             ->where('companies.is_active', true)
             ->first();
+    }
+
+    /** @return HasMany<Order, $this> */
+    public function createdOrders(): HasMany
+    {
+        return $this->hasMany(Order::class, 'created_by');
+    }
+
+    /** @return HasMany<Order, $this> */
+    public function assignedOrders(): HasMany
+    {
+        return $this->hasMany(Order::class, 'assigned_to');
     }
 }

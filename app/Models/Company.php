@@ -82,6 +82,12 @@ class Company extends Model
         )->where('type', CompanyType::BRANCH);
     }
 
+    /** @return HasMany<Branch, $this> */
+    public function operationalBranches(): HasMany
+    {
+        return $this->hasMany(Branch::class);
+    }
+
     /** @return BelongsToMany<User, $this> */
     public function users(): BelongsToMany
     {
@@ -91,6 +97,12 @@ class Company extends Model
                 'is_default',
             ])
             ->withTimestamps();
+    }
+
+    /** @return HasMany<Order, $this> */
+    public function orders(): HasMany
+    {
+        return $this->hasMany(Order::class);
     }
 
     /**

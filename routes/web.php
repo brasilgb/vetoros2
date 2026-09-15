@@ -24,7 +24,7 @@ Route::middleware([
     'auth',
     'current.tenant',
 ])->get('/tenant-security-test', function () {
-    abort_unless(Tenant::current(), 500);
+    abort_unless(Tenant::current() !== null, 500);
 
     return response()->json([
         'ok' => true,

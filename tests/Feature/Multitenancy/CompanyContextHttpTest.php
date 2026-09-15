@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Multitenancy;
 
+use App\Models\Branch;
 use App\Models\Company;
 use App\Models\Tenant;
 use App\Models\User;
@@ -19,21 +20,17 @@ class CompanyContextHttpTest extends TestCase
         $tenant = $this->createTenant('Tenant A', 'tenant-a');
         $tenant->makeCurrent();
         $user = User::factory()->create(['tenant_id' => $tenant->id]);
-        $headquarters = Company::create(['trade_name' => 'Matriz A']);
-        $branch = Company::create([
-            'trade_name' => 'Filial A',
-            'type' => 'branch',
-            'parent_id' => $headquarters->id,
-        ]);
+        $headquarters = Company::create(['tenant_id' => $tenant->id, 'trade_name' => 'Matriz A']);
+        $branch = Branch::factory()->create(['company_id' => $headquarters->id, 'name' => 'Filial A']);
         $access = app(CompanyAccessService::class);
         $access->grant($user, $headquarters, true);
-        $access->grant($user, $branch);
+        $branch->users()->attach($user->id, ['tenant_id' => $tenant->id]);
 
         $response = $this->actingAs($user)
-            ->post(route('companies.switch'), ['company_id' => $branch->id]);
+            ->post(route('companies.switch'), ['company_id' => $headquarters->id]);
 
         $response->assertRedirect();
-        $response->assertSessionHas(CurrentCompany::SESSION_KEY, $branch->id);
+        $response->assertSessionHas(CurrentCompany::SESSION_KEY, $headquarters->id);
     }
 
     public function test_user_cannot_switch_to_an_unauthorized_company(): void
@@ -41,16 +38,15 @@ class CompanyContextHttpTest extends TestCase
         $tenant = $this->createTenant('Tenant A', 'tenant-a');
         $tenant->makeCurrent();
         $user = User::factory()->create(['tenant_id' => $tenant->id]);
-        $headquarters = Company::create(['trade_name' => 'Matriz A']);
-        $unauthorizedCompany = Company::create([
-            'trade_name' => 'Filial A',
-            'type' => 'branch',
-            'parent_id' => $headquarters->id,
-        ]);
+        $headquarters = Company::create(['tenant_id' => $tenant->id, 'trade_name' => 'Matriz A']);
+        $otherTenant = $this->createTenant('Tenant B', 'tenant-b');
+        $otherTenant->makeCurrent();
+        $unauthorizedCompany = Company::factory()->headquarters()->create(['tenant_id' => $otherTenant->id, 'trade_name' => 'Empresa não autorizada']);
+        $tenant->makeCurrent();
 
         $this->actingAs($user)
             ->post(route('companies.switch'), ['company_id' => $unauthorizedCompany->id])
-            ->assertForbidden();
+            ->assertNotFound();
     }
 
     public function test_dashboard_requires_an_authorized_current_company(): void

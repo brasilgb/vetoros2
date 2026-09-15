@@ -13,11 +13,7 @@ trait BelongsToTenant
     {
         static::addGlobalScope(new TenantScope);
 
-        static::creating(function ($model): void {
-            $model->ensureTenantMatchesCurrent();
-        });
-
-        static::updating(function ($model): void {
+        static::saving(function ($model): void {
             $model->ensureTenantMatchesCurrent();
         });
     }
@@ -44,6 +40,7 @@ trait BelongsToTenant
         }
     }
 
+    /** @return BelongsTo<Tenant, $this> */
     public function tenant(): BelongsTo
     {
         return $this->belongsTo(Tenant::class);

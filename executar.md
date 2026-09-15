@@ -1,188 +1,296 @@
-# Complemento — Dashboard template do rootAdmin
+# ORD-08.3 — Validação definitiva da fundação CRM + Ordens
 
-Além do command `root-admin:ensure`, criar uma estrutura própria de dashboard administrativo global.
+Você está trabalhando no VetorOS 2 em Laravel.
 
-## Objetivo
+O objetivo desta rodada é **encerrar definitivamente a fundação CRM + Ordens antes de iniciar ORC-01 — Orçamento da Ordem de Serviço**.
 
-O painel `/admin` deve possuir um template/layout próprio, visualmente coerente com o dashboard do tenant, mas sem reutilizar contexto de tenant ou Company.
+Não implemente orçamento ainda.
 
-Não usar:
+## Arquitetura vigente — NÃO ALTERAR
 
-* `CurrentTenant`
-* `CurrentCompany`
-* `CompanySelector`
-* sidebar operacional do tenant
-* qualquer dependência de `tenant_id`
+A arquitetura oficial atual é:
 
-## Estrutura sugerida
+* single database multitenant;
+* `Tenant` é o limite de isolamento SaaS;
+* `Company` representa a matriz/empresa do tenant;
+* `Branch` representa a unidade operacional/filial;
+* **Company e Branch coexistem**;
+* não consolidar novamente Branch dentro de Company;
+* `Customer`, `CustomerEquipment` e `EquipmentType` são cadastros masters compartilhados no Tenant;
+* Customer e equipamentos não pertencem diretamente a Company ou Branch;
+* a Ordem de Serviço pertence obrigatoriamente ao Tenant, Company e Branch;
+* `OrderCreationService` é o fluxo oficial de abertura da OS;
+* `OrderSnapshotService` cria explicitamente o snapshot inicial;
+* snapshot inicial é imutável;
+* `OrderStatusService` é responsável pelas transições de status;
+* `OrderAssignmentService` é responsável pela atribuição de técnico;
+* `TenantSequenceService` é responsável pela numeração transacional;
+* FKs compostas devem continuar preservando isolamento cross-tenant;
+* não remover scopes, constraints, eventos de proteção ou validações apenas para fazer testes passarem.
 
-Criar um layout administrativo, por exemplo:
+Decisões antigas incompatíveis com isso estão superadas.
 
-```text
-resources/js/layouts/admin-layout.tsx
-```
+## Situação atual
 
-ou seguir a convenção já existente no projeto.
+As últimas correções trataram principalmente:
 
-O layout deve possuir:
+* fixtures tenant-aware;
+* coerência entre Company headquarters e Branch;
+* CustomerEquipment usando Customer e EquipmentType do mesmo Tenant;
+* ChecklistTemplate usando EquipmentType do Tenant correto;
+* identificadores de índices compatíveis com o limite do MySQL;
+* FKs compostas;
+* tipagem PHPStan;
+* factories multitenant;
+* fluxo oficial de criação de Order;
+* snapshots;
+* status;
+* atribuição;
+* visibilidade;
+* sequência transacional.
 
-* header;
-* área principal de conteúdo;
-* nome do usuário logado;
-* identificação discreta de "Administração";
-* botão/logout;
-* estrutura preparada para sidebar futura, caso o layout tenant já utilize esse padrão.
+As execuções automáticas anteriores do agente não conseguiram concluir as suítes porque o MySQL `vetoros2_test` em `127.0.0.1:3306` não estava disponível para o executor.
 
-Visualmente, aproveitar os mesmos primitives/componentes já usados no layout tenant para manter consistência.
+Portanto, **não tente transformar banco indisponível em erro funcional**.
 
-Não criar uma segunda biblioteca visual nem duplicar componentes sem necessidade.
+## IMPORTANTE — banco de testes
 
-## Dashboard inicial
-
-A rota:
-
-```text
-/admin
-```
-
-deve renderizar um dashboard mínimo, semelhante ao tenant:
-
-```text
-Olá, Root Admin
-
-Administração do VetorOS
-
-[Sair]
-```
-
-Se o layout tenant já possui shell/header/sidebar, usar a mesma linguagem visual, mas criar um contexto administrativo separado.
-
-## Navegação inicial
-
-Nesta etapa, não criar módulos administrativos fictícios.
-
-A navegação pode conter apenas:
-
-```text
-Dashboard
-```
-
-Não adicionar ainda:
-
-* Tenants
-* Planos
-* Assinaturas
-* Usuários
-* Financeiro
-* Métricas
-* Configurações globais
-
-Esses itens entrarão quando os respectivos módulos existirem.
-
-## Separação obrigatória
-
-Deve existir separação clara:
-
-```text
-TenantLayout
-→ contexto operacional
-→ Tenant
-→ CurrentCompany
-```
-
-e:
-
-```text
-AdminLayout
-→ contexto global
-→ rootAdmin
-→ sem Tenant
-→ sem CurrentCompany
-```
-
-Não colocar condicionais extensas dentro de um único layout para tentar atender os dois contextos.
-
-Preferir dois layouts claros compartilhando apenas componentes visuais genéricos.
-
-## Segurança
-
-Garantir que:
-
-* `/admin` exige autenticação;
-* `/admin` exige `root.admin`;
-* usuário comum não consegue renderizar `AdminLayout`;
-* rootAdmin não precisa de tenant/company;
-* `HandleInertiaRequests` não deve tentar fornecer contexto operacional obrigatório ao painel root;
-* dados compartilhados globalmente não devem causar erro quando `tenant` e `currentCompany` forem `null`.
-
-## Fluxo esperado
-
-### Usuário comum
-
-```text
-/login
-→ autenticação
-→ Tenant
-→ CurrentCompany
-→ TenantLayout
-→ /dashboard
-```
-
-### rootAdmin
-
-```text
-/login
-→ autenticação
-→ is_root_admin
-→ AdminLayout
-→ /admin
-```
-
-## Testes adicionais
-
-Adicionar testes para comprovar:
-
-* rootAdmin acessa `/admin`;
-* usuário comum recebe bloqueio;
-* guest é redirecionado para login;
-* página admin renderiza o nome do rootAdmin;
-* painel admin funciona com `tenant_id = null`;
-* painel admin funciona sem `current_company_id`;
-* dashboard tenant continua funcionando normalmente após criação do `AdminLayout`.
-
-## Frontend
-
-Executar:
+Os testes devem usar exclusivamente:
 
 ```bash
-npm run types:check
-npm run build
+APP_ENV=testing
 ```
 
-e lint dos arquivos alterados.
-
-## Critério de conclusão
-
-Ao final devemos possuir duas fundações visuais independentes:
+e o banco configurado para testes:
 
 ```text
-Tenant
-→ TenantLayout
-→ Dashboard
-→ nome do usuário
-→ logout
+vetoros2_test
 ```
 
-e:
+Nunca use o banco de desenvolvimento para limpar, migrar ou executar testes destrutivos.
+
+Antes de concluir que existe problema de código, confira:
+
+```bash
+php artisan about --env=testing
+php artisan config:show database
+```
+
+ou equivalente seguro, garantindo que:
 
 ```text
-rootAdmin
-→ AdminLayout
-→ Dashboard Admin
-→ nome do usuário
-→ logout
+APP_ENV=testing
+DB_DATABASE=vetoros2_test
 ```
 
-Ainda sem implementar módulos de negócio ou administração.
+Não altere `.env` de desenvolvimento apenas para satisfazer o executor.
 
-Esse dashboard administrativo será o template base para os futuros recursos globais do SaaS.
+## Estratégia desta rodada
+
+A intenção é evitar várias passadas pequenas.
+
+Quando os resultados dos testes estiverem disponíveis, faça uma análise global das falhas e:
+
+1. agrupe-as por causa raiz;
+2. identifique problemas comuns em factories/helpers/fixtures antes de corrigir testes individualmente;
+3. corrija **todas as ocorrências da mesma classe de problema**;
+4. execute ou deixe preparados os testes de regressão;
+5. só depois procure a próxima causa raiz.
+
+Não faça:
+
+> corrigir primeiro teste → parar → entregar.
+
+Faça:
+
+> encontrar causa raiz → localizar todos os locais afetados → corrigir o conjunto → validar o conjunto.
+
+## Validação obrigatória
+
+A validação manual que será executada é:
+
+```bash
+APP_ENV=testing php artisan migrate:fresh --force
+
+APP_ENV=testing php artisan test --compact tests/Feature/CRM
+
+APP_ENV=testing php artisan test --compact tests/Feature/Orders
+
+APP_ENV=testing php artisan test --compact
+
+APP_ENV=testing vendor/bin/phpstan analyse
+
+./vendor/bin/pint --dirty --test --format agent
+
+git diff --check
+```
+
+### Se houver falhas
+
+Analise a saída completa.
+
+Não corrija somente o primeiro erro.
+
+Procure padrões como:
+
+* Tenant ausente;
+* factory criando relacionamento em Tenant diferente;
+* Company não sendo headquarters;
+* Branch vinculada à Company errada;
+* CustomerEquipment incompatível com Customer;
+* CustomerEquipment incompatível com EquipmentType;
+* ChecklistTemplate usando EquipmentType cross-tenant;
+* usuário/técnico sem vínculo operacional adequado;
+* criação direta de Order burlando `OrderCreationService`;
+* snapshot duplicado ou criado implicitamente;
+* status alterado fora de `OrderStatusService`;
+* atribuição alterada fora de `OrderAssignmentService`;
+* sequência criada fora de `TenantSequenceService`;
+* problemas de FK composta;
+* problema de enum/cast;
+* problema real apontado pelo PHPStan.
+
+Se uma causa afetar vários arquivos, corrija todos antes de entregar.
+
+## Regras de factories e fixtures
+
+Factories devem produzir registros válidos por padrão.
+
+Não relaxar as invariantes dos Models para adaptar testes.
+
+### BranchFactory
+
+Uma `Branch` válida deve sempre:
+
+* pertencer ao Tenant correto;
+* estar vinculada a uma `Company` do mesmo Tenant;
+* usar uma Company headquarters válida.
+
+### CustomerEquipment
+
+Um equipamento válido deve possuir:
+
+* Customer do Tenant atual;
+* EquipmentType do mesmo Tenant;
+* `tenant_id` coerente nos três registros.
+
+### ChecklistTemplate
+
+Quando possuir `equipment_type_id`:
+
+* EquipmentType deve pertencer ao mesmo Tenant.
+
+### Order
+
+Fixtures positivas devem assegurar:
+
+* Tenant coerente;
+* Company headquarters correta;
+* Branch pertencente à Company;
+* Customer do mesmo Tenant;
+* CustomerEquipment, quando utilizado, pertencente ao Customer;
+* EquipmentType compatível;
+* criador e técnico, quando presentes, pertencentes ao Tenant;
+* técnico compatível com a unidade quando a regra exigir.
+
+Testes negativos podem deliberadamente violar essas relações para provar as proteções.
+
+## Proibições
+
+Para fazer testes passarem, não utilize:
+
+* `withoutEvents()`;
+* `withoutGlobalScopes()`, exceto onde já faça parte legítima da implementação interna de validação;
+* `DB::table(...)->insert()` para contornar Models;
+* remoção de FKs;
+* remoção de FKs compostas;
+* remoção de TenantScope;
+* relaxamento de validações cross-tenant;
+* troca de RESTRICT por comportamento que destrua histórico;
+* remoção de testes válidos;
+* alteração de expectation só para tornar o teste verde;
+* mocks para substituir comportamento de banco que deve ser validado de verdade.
+
+## Auditoria adicional
+
+Antes de encerrar, faça busca no código operacional por criações ou alterações que possam burlar os serviços oficiais.
+
+Procure pelo menos por:
+
+```text
+Order::create
+Order::forceCreate
+new Order
+->status =
+assigned_to
+order_number
+MAX(
+max(
+OrderSnapshot::create
+```
+
+Classifique cada ocorrência.
+
+Factories e testes podem criar entidades diretamente quando necessário ao cenário.
+
+Código operacional não deve possuir fluxo concorrente ao serviço oficial sem justificativa explícita.
+
+## Critério de encerramento
+
+ORD-08 só pode ser declarado **DONE** quando:
+
+* CRM estiver verde;
+* Orders estiver verde;
+* suíte completa estiver verde;
+* PHPStan estiver verde;
+* Pint estiver verde;
+* `git diff --check` estiver verde;
+
+OU, caso o executor continue impossibilitado de acessar o MySQL:
+
+* não declarar testes como PASS;
+* registrar exatamente o bloqueio de infraestrutura;
+* deixar todas as correções possíveis concluídas;
+* fornecer os comandos manuais acima;
+* não inventar resultado.
+
+## Depois do fechamento
+
+Se toda a fundação estiver validada, registrar no relatório:
+
+```text
+ORD-08 — DONE
+CRM FOUNDATION — STABLE
+ORDER FOUNDATION — STABLE
+READY FOR ORC-01
+```
+
+Não implementar ORC-01 nesta rodada.
+
+## Entrega
+
+Atualize `resumo.md` com:
+
+1. diferenças encontradas;
+2. causas raiz das falhas;
+3. arquivos corrigidos;
+4. correções realizadas;
+5. resultado real de cada suíte;
+6. resultado do PHPStan;
+7. resultado do Pint;
+8. resultado de `git diff --check`;
+9. auditoria dos fluxos oficiais;
+10. riscos remanescentes;
+11. estado final:
+
+```text
+ORD-08 — DONE
+```
+
+ou:
+
+```text
+ORD-08 — MANUAL VALIDATION REQUIRED
+```
+
+Não declare DONE sem evidência real.
