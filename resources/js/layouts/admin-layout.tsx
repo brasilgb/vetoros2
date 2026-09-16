@@ -15,9 +15,12 @@ export default function AdminLayout({ children }: Props) {
     const { auth } = usePage().props as { auth: { user: User } };
 
     return (
-        <div className="flex min-h-screen flex-col bg-background text-foreground">
+        <div className="bg-background text-foreground flex min-h-screen flex-col">
             <header className="border-border flex h-16 items-center border-b px-6">
-                <Link href={admin.dashboard()} className="flex items-center gap-2">
+                <Link
+                    href={admin.dashboard()}
+                    className="flex items-center gap-2"
+                >
                     <AppLogo />
                 </Link>
                 <span className="text-muted-foreground ml-6 border-l pl-6 text-sm">

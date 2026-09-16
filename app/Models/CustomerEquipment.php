@@ -33,7 +33,7 @@ class CustomerEquipment extends Model
     {
         static::saving(function (CustomerEquipment $equipment): void {
             foreach ([['customer_id', Customer::class], ['equipment_type_id', EquipmentType::class]] as [$key, $class]) {
-                if ($equipment->{$key} !== null && ! $class::withoutGlobalScopes()->whereKey($equipment->{$key})->where('tenant_id', $equipment->tenant_id)->exists()) {
+                if (! $class::withoutGlobalScopes()->whereKey($equipment->{$key})->where('tenant_id', $equipment->tenant_id)->exists()) {
                     throw new LogicException('Customer equipment relationships must belong to the current tenant.');
                 }
             }

@@ -33,3 +33,6 @@ Route::middleware([
 });
 
 require __DIR__.'/settings.php';
+require __DIR__.'/budgets.php';
+require __DIR__.'/customers.php';
+require __DIR__.'/orders.php';

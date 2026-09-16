@@ -44,7 +44,7 @@ class OrderStatusService
             $lockedOrder = Order::query()->lockForUpdate()->findOrFail($order->id);
             $from = $lockedOrder->status;
 
-            if (! in_array($to, self::TRANSITIONS[$from->value] ?? [], true)) {
+            if (! in_array($to, self::TRANSITIONS[$from->value], true)) {
                 throw new LogicException("Cannot transition order from {$from->value} to {$to->value}.");
             }
 

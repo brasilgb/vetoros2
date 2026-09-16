@@ -166,4 +166,16 @@ class Order extends Model
     {
         return $this->hasMany(OrderMedia::class);
     }
+
+    /** @return HasMany<Budget, $this> */
+    public function budgets(): HasMany
+    {
+        return $this->hasMany(Budget::class)->orderBy('budget_number');
+    }
+
+    /** @return HasOne<Budget, $this> */
+    public function latestBudget(): HasOne
+    {
+        return $this->hasOne(Budget::class)->latestOfMany('id');
+    }
 }

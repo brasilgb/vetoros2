@@ -93,4 +93,16 @@ class Tenant extends BaseTenant
     {
         return $this->hasMany(TenantSequence::class);
     }
+
+    /** @return HasMany<BudgetTemplate, $this> */
+    public function budgetTemplates(): HasMany
+    {
+        return $this->hasMany(BudgetTemplate::class);
+    }
+
+    /** @return HasMany<Budget, $this> */
+    public function budgets(): HasMany
+    {
+        return $this->hasMany(Budget::class);
+    }
 }

@@ -16,6 +16,351 @@ Data: 2026-09-15
 - status e atribuição são tratados por serviços explícitos;
 - FKs compostas preservam o isolamento cross-tenant.
 
+> **Nota de recuperação (atualizada em 2026-09-16, terceira/quarta ocorrência):** este arquivo foi encontrado **vazio (0 bytes)** no início de mais uma sessão (a que produziu o ORC-04 abaixo), pela terceira vez consecutiva nesta sequência de trabalho, sempre entre o fim de uma sessão e o início da próxima, sem qualquer ação desta conversa tê-lo apagado. Seguindo a seção "20. Preservação do resumo.md" do próprio `executar.md` desta rodada (que já documentava esse histórico de perda), o conteúdo foi restaurado com `git show HEAD:resumo.md > resumo.md` (nunca `git checkout`/`git restore`, e sem jamais substituir por uma versão antiga que descartasse trabalho novo) e as seções não commitadas — **ORC-04**, **ORC-03.1** e **ORC-01.1 + ORC-02** — foram reconstruídas a partir do que esta mesma linha de sessões já havia escrito, preservado nesta conversa. Uma seção `ORD-08.3 (final)` e rodadas intermediárias do ORC-01 de sessões ainda mais antigas continuam irrecuperáveis (nunca foram commitadas). **`resumo.md` (e todo o código do ORC-01 a ORC-04) segue sem commit** — cada rodada nova corre o mesmo risco até que isso seja commitado.
+
+## ORC-04 — Interface Operacional de Orçamentos
+
+Data: 2026-09-16
+
+### Diferença encontrada
+
+O `executar.md` mudou de uma rodada de validação (ORC-03.1) para a implementação da **camada operacional/interface de Orçamentos**: menu, listagem, criação (com ou sem OS, manual ou por template), tela de detalhe com workflow, manutenção de orçamentos pré-definidos, controllers/requests/rotas e testes HTTP. Esta é a primeira camada HTTP/UI de todo o projeto — não existia nenhum controller, rota ou página operacional (Orders também não tem UI ainda), apenas autenticação, settings e um seletor de Company.
+
+### Decisões arquiteturais
+
+- **Nenhuma implicit route-model-binding tenant-scoped.** Todas as rotas usam `{budget}`/`{budgetTemplate}`/`{item}` como parâmetros inteiros simples (`int $budget`), resolvidos manualmente dentro do controller via `Budget::query()->findOrFail($id)` (que já aplica o `TenantScope` global do Model). Isso evita depender da ordem exata em que o Laravel intercala `SubstituteBindings` com o middleware customizado `current.tenant` — uma ambiguidade de framework que não valia a pena arriscar num ponto de isolamento multitenant.
+- **`BudgetVisibilityService` (novo)**, espelhando exatamente o `OrderVisibilityService` já existente (ORD-04): root admin vê tudo; demais usuários veem orçamentos das Companies matriz às quais têm acesso (`company_user`) e das Branches às quais têm acesso (`branch_user`). Usado na listagem e na verificação de acesso da tela de detalhe (`abort_unless(canView(...), 403)`).
+- **Erros de domínio nunca viram página de erro 500.** Todo `LogicException` lançado pelos serviços oficiais (`BudgetCreationService`, `BudgetApprovalService`, `OrderBudgetService`, ou os próprios Models) é capturado nos controllers e convertido em `Inertia::flash('toast', ['type' => 'error', 'message' => ...])` + redirect de volta — usando o mecanismo de flash/toast que já existia no projeto (`Inertia::flash`/`useFlashToast`, o mesmo usado por `ProfileController`), sem inventar um novo padrão.
+- **UI nunca calcula nem envia o total.** O item “manual” do formulário de criação mostra uma soma apenas como estimativa (rotulada explicitamente como tal); o valor oficial vem sempre do backend (`BudgetCalculator`, via `BudgetCreationService`/`BudgetItemController::recalculateTotals()`), que recalcula subtotal/desconto/total do zero a cada alteração de item.
+- **Sem segunda máquina de estados no frontend.** `budgets/show.tsx` só exibe os botões cujo `can_*` (`canEdit`/`canSend`/`canApprove`/`canReject`/`canCancel`, já existentes no Model `Budget` desde o ORC-03.1) vem `true` do backend; nenhuma regra de transição foi duplicada em React.
+- **Duas rotas de lookup JSON** (`budgets/lookup/orders`, `budgets/lookup/customers`) foram implementadas no backend (tenant-scoped, reaproveitando `OrderVisibilityService`), mas a tela de criação usa filtragem client-side sobre as listas pré-carregadas (até 100 clientes e 50 OS recentes) em vez de consumi-las via fetch assíncrono — decisão consciente de escopo para este marco, documentada como risco abaixo.
+- **`BudgetTemplate`/`BudgetTemplateItem` continuam criados diretamente pelo Model** (`BudgetTemplate::query()->create()`, `$template->items()->create()`), sem novo serviço dedicado — mesmo padrão já estabelecido desde o ORC-01 (nunca existiu um `BudgetTemplateCreationService`).
+- **`sort_order` de novos itens usa `->max('sort_order') + 1`** (em `BudgetItemController` e `BudgetTemplateItemController`). Isso é apenas uma dica de ordenação de exibição, não numeração transacional/única — não é o padrão proibido de `MAX(order_number)+1`; a auditoria de bypass (seção 19) tratou essa distinção explicitamente.
+
+### Rotas e telas criadas
+
+`routes/budgets.php` (novo, incluído em `routes/web.php`), todas sob `['auth','verified','current.tenant','current.company']`:
+
+- `GET /budgets`, `GET /budgets/create`, `POST /budgets`, `GET /budgets/{budget}`;
+- `POST/PUT/DELETE /budgets/{budget}/items[/{item}]`;
+- `POST /budgets/{budget}/send|approve|reject|cancel|reopen|attach-to-order`;
+- `GET /budgets/lookup/orders`, `GET /budgets/lookup/customers` (JSON);
+- `GET /budget-templates`, `GET /budget-templates/create`, `POST /budget-templates`, `GET /budget-templates/{budgetTemplate}[/edit]`, `PUT /budget-templates/{budgetTemplate}`;
+- `POST/PUT/DELETE /budget-templates/{budgetTemplate}/items[/{item}]`.
+
+Páginas Inertia/React (novas):
+
+- `resources/js/pages/budgets/index.tsx` — listagem com busca (número, cliente, documento, número da OS), filtros reais (status, empresa, unidade, vínculo com OS, período) e paginação.
+- `resources/js/pages/budgets/create.tsx` — experiência única de criação: alterna entre "para uma OS" / "sem OS" e "começar vazio" / "usar orçamento pré-definido"; deriva cliente/empresa/unidade da OS quando aplicável; editor de itens manual.
+- `resources/js/pages/budgets/show.tsx` — detalhe em abas (Geral / Itens / Vínculos e status); itens editáveis somente enquanto `can_edit`; botões de ação somente quando o backend permite (`can_send`/`can_approve`/`can_reject`/`can_cancel`, mais "Reabrir OS" quando a Order está `budget_rejected`, e "Vincular à Ordem de Serviço" quando standalone e ainda em draft).
+- `resources/js/pages/budget-templates/index.tsx`, `create.tsx`, `show.tsx` (com gestão de itens), `edit.tsx` (nome, descrição, ativo/inativo, notas).
+
+Componentes novos: `budget-status-badge`, `combobox-select` (busca client-side sobre lista pré-carregada, sem nova dependência), `item-draft-editor` (itens em memória na criação), `budget-item-form-dialog` / `template-item-form-dialog` (dialogs de item persistido). Primitivas shadcn novas, sem novas dependências npm: `table.tsx`, `textarea.tsx`, `tabs.tsx` (implementação própria sem Radix, já que `@radix-ui/react-tabs` não está instalado e o projeto pede aprovação antes de mudar dependências).
+
+Backend (novo):
+
+- `app/Services/BudgetVisibilityService.php`;
+- `app/Support/BudgetPresenter.php` (serialização compartilhada entre listagem e detalhe);
+- `app/Http/Controllers/Budgets/{BudgetController,BudgetItemController,BudgetWorkflowController,BudgetLookupController}.php`;
+- `app/Http/Controllers/BudgetTemplates/{BudgetTemplateController,BudgetTemplateItemController}.php`;
+- `app/Http/Requests/Budgets/{StoreBudgetRequest,StoreBudgetItemRequest,UpdateBudgetItemRequest,AttachBudgetToOrderRequest}.php`;
+- `app/Http/Requests/BudgetTemplates/{StoreBudgetTemplateRequest,UpdateBudgetTemplateRequest,StoreBudgetTemplateItemRequest,UpdateBudgetTemplateItemRequest}.php`;
+- `app/Http/Concerns/HandlesDomainActions.php` (trait pequeno: roda uma ação de domínio e converte `LogicException` em toast de erro, ou sucesso em toast de sucesso).
+
+### Workflow implementado
+
+Fiel ao workflow já existente (ORC-02/ORC-03), sem nenhuma regra nova:
+
+- Enviar → `OrderBudgetService::send()`; Aprovar/Rejeitar/Cancelar → `OrderBudgetService::approve()/reject()/cancel()`; Reabrir após rejeição → `OrderBudgetService::reopenAfterRejection($budget, $order, $actor)` (a Order é resolvida a partir do próprio `$budget->order_id`, nunca aceita solta do cliente); Vincular à Ordem de Serviço → `BudgetCreationService::attachToOrder()`.
+- Criação para OS → `OrderBudgetService::createForOrder()` (com ou sem template); criação standalone → `BudgetCreationService::createStandalone()`/`createStandaloneFromTemplate()`.
+
+### Testes adicionados
+
+`tests/Feature/Budgets/BudgetHttpTest.php` (novo, 14 testes): listagem isolada por tenant; página de criação expõe as props esperadas; criação para OS (manual e por template); criação standalone (manual); validação exige Order OU Customer+Company; Order de outro tenant rejeitada na validação; `show` de orçamento de outro tenant retorna 404; workflow completo enviar→aprovar via HTTP move a Order; rejeitar→reabrir via HTTP; transição inválida vira toast de erro (sem 500) e não altera o estado; itens podem ser geridos em draft e ficam bloqueados após enviar (toast de erro, sem 500); vincular orçamento standalone a uma Order; vincular com cliente divergente vira toast de erro e não altera `order_id`.
+
+Também foi corrigido, durante a escrita dos testes, um teste com asserção equivocada (`test_items_can_be_managed_while_draft_and_are_blocked_once_sent` originalmente esperava um total que ignorava um item pré-existente do orçamento de fixture) — sem nenhuma mudança de comportamento do produto, apenas do teste.
+
+### Resultado real de cada suíte (banco `vetoros2_test`, migration limpa)
+
+- `APP_ENV=testing php artisan migrate:fresh --force` → **PASS** (19 migrations).
+- `APP_ENV=testing php artisan test --compact tests/Feature/Budgets` → **PASS** (49 passed, 141 assertions).
+- `APP_ENV=testing php artisan test --compact tests/Feature/Orders` → **PASS** (38 passed, 75 assertions).
+- `APP_ENV=testing php artisan test --compact tests/Feature/CRM` → **PASS** (7 passed, 10 assertions).
+- `APP_ENV=testing php artisan test --compact` (suíte completa) → **PASS** (156 passed, 4 skipped, 0 failed, 383 assertions).
+- `APP_ENV=testing vendor/bin/phpstan analyse` → **PASS** (0 erros).
+- `./vendor/bin/pint --dirty --test --format agent` → **PASS**.
+- `git diff --check` → **PASS**.
+- `npm run types:check` (`tsc --noEmit`) → **PASS** (0 erros).
+- `npx vp check --fix` (formatação + lint), restrito aos arquivos novos/alterados do frontend → **PASS**, 0 avisos/erros em 15 arquivos.
+- `npm run build` (`vp build`) → **PASS**, build de produção concluído em ~14s sem erros.
+
+### Auditoria de bypass (seção 19)
+
+Busca textual por `Budget::create`, `Budget::forceCreate`, `new Budget`, `Order::create`, `Order::forceCreate`, `new Order`, `->status =`, `MAX(`, `max(` em `app/`, `routes/` e `database/migrations/`:
+
+- Único `new Budget` em código operacional: `BudgetCreationService::persist()`.
+- Único `Order::create` em código operacional: `OrderCreationService::create()`.
+- Nenhum `Budget::forceCreate`, `Order::forceCreate`, `new Order` ou `->status =` em código operacional.
+- As duas ocorrências de `max(` são `->items()->max('sort_order')` em `BudgetItemController`/`BudgetTemplateItemController` — apenas a próxima posição de exibição de um item novo, não numeração transacional; `budget_number`/`order_number` continuam exclusivamente por `TenantSequenceService`.
+
+Nenhum controller/rota nova cria `Budget` fora dos serviços oficiais.
+
+### Riscos remanescentes
+
+- **Perda recorrente de `resumo.md` não commitado** (ver nota de recuperação no topo) — persiste pela terceira vez. Reforça a recomendação: commitar `resumo.md` e todo o trabalho ORC-01→ORC-04.
+- As duas rotas de lookup JSON (`budgets/lookup/orders`/`customers`) existem no backend mas não são consumidas pelo frontend ainda; a tela de criação filtra client-side sobre até 100 clientes/50 OS pré-carregados. Isso é suficiente para o volume inicial de dados, mas deixará de ser em produção com uma base de clientes maior — a integração do `ComboboxSelect` com essas rotas via fetch assíncrono fica como próximo passo natural, sem exigir mudança de contrato do backend.
+- Não há página HTTP para Orders ainda (só o domínio); a tela de Budget `show.tsx` exibe o número/status da OS vinculada como texto simples, sem link, porque não existe rota para visualizá-la.
+- `Company`/`Branch` como filtros e seletores assumem, na prática, uma única matriz por tenant (regra de negócio já existente: “a tenant can have only one headquarters”); o código não impõe isso na UI, apenas reflete o que o domínio já impõe.
+- Nenhum teste de "snapshot"/screenshot de UI foi feito manualmente num navegador real (sem servidor `npm run dev` interativo neste ambiente); a validação da interface foi feita via `tsc --noEmit`, lint, build de produção e os testes HTTP do Laravel (que renderizam e verificam as props Inertia reais), não via inspeção visual.
+
+### Estado final
+
+```text
+migrate:fresh                                  PASS
+Budgets                                        PASS (49 passed, 141 assertions)
+Orders                                         PASS (38 passed, 75 assertions)
+CRM                                            PASS (7 passed, 10 assertions)
+Suíte completa                                 PASS (156 passed, 4 skipped, 0 failed, 383 assertions)
+PHPStan                                        PASS (0 erros)
+Pint                                           PASS
+git diff --check                               PASS
+TypeScript (tsc --noEmit)                      PASS
+Lint/format (frontend novo)                    PASS
+Build de produção (vp build)                   PASS
+
+Única experiência operacional                  OK
+Orçamento manual e por template                 OK
+Orçamento com ou sem OS                         OK
+Vínculo posterior à OS                          OK
+Múltiplos Budgets por Order preservados         OK
+Máquinas de estado respeitadas (sem duplicação) OK
+Sem edição após draft                           OK
+Histórico preservado                            OK
+Tenant/Company/Branch respeitados               OK
+Serviços oficiais utilizados                    OK
+Testes reais                                    OK
+Sem bypass de domínio                           OK
+Compila corretamente                            OK
+
+ORC-04 — DONE
+```
+
+---
+
+## ORC-03.1 — Validação definitiva do workflow Order × Budget
+
+Data: 2026-09-16
+
+### Diferença encontrada
+
+O `executar.md` mudou novamente: ao iniciar esta rodada, o ORC-03 (`OrderBudgetService`, `Budget::canEdit()/canSend()/canApprove()/canReject()/canCancel()`, `Order::latestBudget()` e `tests/Feature/Budgets/OrderBudgetWorkflowTest.php`) já estava implementado no working tree (não fazia parte desta conversa; encontrado pronto no disco ao início da sessão). O objetivo desta rodada era **exclusivamente validar e corrigir** o ORC-03 até ficar realmente verde — não implementar ORC-04.
+
+### Causas raiz encontradas
+
+1. **Divergência entre `Budget::canEdit()` e a trava real de edição dos itens.** `Budget::canEdit()` só retornava `true` para `status === DRAFT`, mas `BudgetItem::assertBudgetIsEditable()` (criado no ORC-02) só bloqueava escrita/remoção quando o Budget estava `approved` ou `rejected` — deixando os itens de um orçamento `sent` (já enviado ao cliente) livremente editáveis, embora `canEdit()` já dissesse que não. É exatamente o tipo de divergência que a seção 8 do `executar.md` pede para eliminar ("não permitir divergência" entre os métodos semânticos e a máquina de estados real).
+
+Nenhuma outra causa raiz de banco, migration ou transação foi encontrada: `migrate:fresh` e todas as suítes já passavam antes de qualquer correção.
+
+### Arquivos alterados
+
+- `app/Models/BudgetItem.php`
+- `app/Services/OrderBudgetService.php` (nesta reexecução: `reopenAfterRejection()` passou a validar explicitamente o vínculo Budget × Order — ver detalhes na rodada seguinte de validação, registrada logo acima como parte do ORC-03/ORC-04)
+
+### Correções realizadas
+
+- `BudgetItem::assertBudgetIsEditable()` passou a delegar para `Budget::canEdit()` (`! $budget->canEdit()` bloqueia a escrita/remoção) em vez de manter uma segunda lista hard-coded de status (`[APPROVED, REJECTED]`). Isso centraliza a regra "o que é editável" em um único lugar (o Model `Budget`, fonte da verdade também para a UI) e faz os itens ficarem imutáveis assim que o orçamento sai de `draft` (`sent`, `approved`, `rejected` ou `cancelled`), eliminando a divergência.
+- Nenhuma FK, scope ou validação multitenant foi removida ou enfraquecida.
+
+### Cobertura de testes adicionada
+
+`tests/Feature/Budgets/OrderBudgetWorkflowTest.php` (arquivo já existente, ampliado):
+
+- asserção do status da Order imediatamente após `reject()` (antes do reopen) e imediatamente após `reopenAfterRejection()`;
+- rejeição standalone (`draft → sent → rejected`) sem Order, simetricamente ao teste de aprovação standalone já existente;
+- cancelamento de um Budget `draft` não altera a Order;
+- cancelamento de um Budget `sent` **não** reverte nem altera o status da Order (`budget_generated` permanece), documentando o comportamento efetivo pedido na seção 7;
+- itens de um Budget `sent` não podem mais ser alterados (regressão direta da correção acima);
+- `OrderBudgetService::createForOrder()` rejeita uma Order de outro tenant;
+- `OrderBudgetService::send()` rejeita um ator de outro tenant;
+- `OrderBudgetService::createForOrderFromTemplate()` rejeita um `BudgetTemplate` de outro tenant;
+- (numa reexecução posterior desta mesma validação) `reopenAfterRejection()` rejeita um Budget de uma Order diferente, um Budget de outro tenant, e um Budget que não está `rejected` — ver detalhes na seção ORC-04 acima, que é quando essa lacuna específica foi fechada.
+
+`tests/Feature/Budgets/BudgetOrderIntegrationTest.php` (ampliado):
+
+- gravação direta de um `Budget` com `company_id` divergente da Order vinculada é rejeitada (mesma proteção já testada para `customer_id`, agora também para `company_id`).
+
+`tests/Feature/Budgets/OrderLatestBudgetTest.php` (novo, cobre a seção 9 do `executar.md`):
+
+- Order sem nenhum Budget → `latestBudget` é `null`;
+- Order com um único Budget → `latestBudget` retorna esse Budget;
+- Order com três Budgets → `latestBudget` retorna determinística e corretamente o de maior `id` (o mais recente), não um qualquer.
+
+### Verificação de rollback real (seção 4)
+
+O teste pré-existente `test_send_rolls_back_budget_when_order_transition_fails` foi executado e confirma rollback real: força-se a Order para `budget_approved` antes de chamar `OrderBudgetService::send()` num Budget `draft` da mesma Order; a transição da Order para `budget_generated` falha (transição inválida a partir de `budget_approved`), e o teste confirma que o Budget permanece `draft` — ou seja, a mudança de status do Budget feita dentro da mesma transação externa foi revertida de verdade pelo MySQL via savepoints do Laravel, sem necessidade de nenhuma compensação manual.
+
+### Auditoria de transações aninhadas (seção 5) e locks (seção 11)
+
+- `OrderBudgetService::send()` abre sua própria `DB::transaction()` e, dentro dela, chama `BudgetApprovalService::send()` (que abre outra `DB::transaction()` e usa `lockForUpdate()` no Budget) seguido de `OrderStatusService::transition()` (que também abre `DB::transaction()` e usa `lockForUpdate()` na Order). O Laravel usa savepoints para transações aninhadas na mesma conexão, e o teste de rollback acima prova empiricamente que a composição funciona corretamente no MySQL real.
+- `OrderBudgetService::approve()`/`reject()` delegam diretamente para `BudgetApprovalService::approve()`/`reject()`, que já fazem toda a orquestração (lock do Budget + transição da Order) dentro de uma única transação própria — não há uma transação externa redundante a mais nesses dois métodos, o que é correto e evita nesting desnecessário.
+- Locks (`lockForUpdate()`) já estavam corretamente presentes em `BudgetApprovalService::transition()` (linha do Budget) e `OrderStatusService::transition()` (linha da Order), auditados nesta rodada via busca textual — nenhuma chamada de `send()`/`approve()`/`reject()` ocorre sem lock da linha correspondente.
+- Não foi construída infraestrutura de teste de concorrência real (múltiplas conexões/threads), pois o próprio `executar.md` permite auditoria de código quando os locks já estão corretos ("não construir infraestrutura complexa de concorrência se não for necessária"); a auditoria confirma que os locks corretos já protegem `send()`/`approve()`/`reject()` contra chamadas duplicadas na mesma linha.
+
+### Resultado real de cada suíte (banco `vetoros2_test`, migration limpa)
+
+- `APP_ENV=testing php artisan migrate:fresh --force` → **PASS** (19 migrations).
+- `APP_ENV=testing php artisan test --compact tests/Feature/Budgets/OrderBudgetWorkflowTest.php` (isolado) → **PASS**.
+- `APP_ENV=testing php artisan test --compact tests/Feature/Budgets` (completo) → **PASS**.
+- `APP_ENV=testing php artisan test --compact tests/Feature/Orders` → **PASS**.
+- `APP_ENV=testing php artisan test --compact tests/Feature/CRM` → **PASS**.
+- `APP_ENV=testing php artisan test --compact` (suíte completa) → **PASS**.
+- `APP_ENV=testing vendor/bin/phpstan analyse` → **PASS** (0 erros).
+- `./vendor/bin/pint --dirty --test --format agent` → **PASS**.
+- `git diff --check` → **PASS**.
+
+(Os números exatos de testes/assertions desta rodada específica variaram ligeiramente entre reexecuções por causa da adição posterior dos testes de `reopenAfterRejection`; os números finais consolidados, já incluindo tudo, estão registrados na seção ORC-04 acima.)
+
+### Auditoria de bypass (seção 14)
+
+Busca textual por `Budget::create`, `Budget::forceCreate`, `new Budget`, `Order::create`, `Order::forceCreate`, `->status =`, `MAX(`, `max(` em `app/`, `database/factories/`, `database/migrations/` e `routes/`:
+
+- Único `new Budget` em código operacional: `BudgetCreationService::persist()`.
+- Único `Order::create` em código operacional: `OrderCreationService::create()`.
+- Nenhum `->status =`, `Budget::create`/`forceCreate`, `Order::forceCreate`, `MAX(`/`max(` em código operacional.
+- `OrderBudgetService` não duplica regras de transição: delega toda mudança de status de Budget para `BudgetApprovalService` e toda mudança de status de Order para `OrderStatusService`, apenas orquestrando a chamada conjunta em `send()`.
+
+Nenhum bypass dos serviços oficiais foi encontrado.
+
+### Riscos remanescentes (nesta rodada; ver ORC-04 acima para o estado mais atual)
+
+- **Perda de histórico não commitado deste arquivo** (ver nota de recuperação no topo) — persistente entre sessões.
+- Cobertura de concorrência real (múltiplas conexões simultâneas) não foi testada com infraestrutura de multi-thread/multi-conexão, apenas auditada via código.
+- `OrderBudgetService::reopenAfterRejection()`, na primeira versão desta rodada, não validava que o Budget rejeitado realmente pertencia à Order informada — **resolvido na rodada seguinte** (ver seção ORC-04 acima).
+
+### Estado final (desta rodada específica)
+
+```text
+ORC-03 — DONE
+READY FOR ORC-04
+```
+
+---
+
+## ORC-01.1 + ORC-02 — Validação final da fundação de Orçamentos e integração com a Ordem de Serviço
+
+Data: 2026-09-16
+
+### Diferença encontrada
+
+O `executar.md` estava completamente diferente da execução anterior registrada neste arquivo (que fechava ORD-08.3 e travava a implementação de orçamento). A nova rodada trouxe duas partes: **PARTE 1 — ORC-01.1**, validação definitiva do ORC-01 (fundação de Budget/BudgetTemplate) já implementado numa sessão anterior, e **PARTE 2 — ORC-02**, a integração do domínio de Orçamentos com a Ordem de Serviço (orçamento direto, manual, por template, template reutilizável e vinculação posterior). Desta vez o MySQL de testes (`127.0.0.1:3306/vetoros2_test`, MariaDB local) estava acessível, permitindo validação real de ponta a ponta.
+
+### PARTE 1 — ORC-01.1 — causas raiz encontradas na validação
+
+1. **Identificador de índice do MySQL acima de 64 caracteres.** `budget_template_items_tenant_id_budget_template_id_sort_order_index` (67 caracteres, nome automático do Laravel para `$table->index(['tenant_id','budget_template_id','sort_order'])`) foi rejeitado pelo MySQL com `SQLSTATE[42000]: ... Identifier name ... is too long`. Mesma classe de problema já registrada no ORD-08 para `order_checklist_items`.
+2. **FK composta com `ON DELETE SET NULL` sobre coluna tenant não anulável.** `budget_items.source_template_item_id` é nullable, mas a FK composta declarada era `(tenant_id, source_template_item_id) → budget_template_items(tenant_id, id)` com `nullOnDelete()`. Como `tenant_id` nunca é nulo, o InnoDB rejeita `ON DELETE SET NULL` numa constraint em que uma das colunas não aceita NULL (`SQLSTATE[HY000]: 1005 Foreign key constraint is incorrectly formed`). O padrão já usado no projeto para FKs compostas nullable (ex.: `orders.customer_equipment_id`) é `restrictOnDelete()`, não `nullOnDelete()`.
+
+### PARTE 1 — Arquivos corrigidos
+
+- `database/migrations/2026_09_16_100000_create_budgets_tables.php`
+
+### PARTE 1 — Correções realizadas
+
+- Nomeado explicitamente o índice de `budget_template_items` como `bti_tenant_template_sort_idx` (curto, sem colisão), preservando as mesmas colunas.
+- Trocado `nullOnDelete()` por `restrictOnDelete()` na FK simples e na FK composta de `budget_items.source_template_item_id`, alinhando com o padrão de FKs compostas nullable já usado no projeto (`orders.customer_equipment_id`, `orders.branch_id`).
+- Nenhuma invariante, scope ou validação de negócio foi relaxada; nenhuma migration destrutiva foi rodada fora do banco `vetoros2_test`.
+
+### PARTE 1 — Resultado real de cada suíte (banco `vetoros2_test`, migration limpa)
+
+- `APP_ENV=testing php artisan migrate:fresh --force` → **PASS**, todas as 19 migrations aplicadas sem erro.
+- `APP_ENV=testing php artisan test --compact tests/Feature/CRM` → **PASS** (7 passed, 10 assertions).
+- `APP_ENV=testing php artisan test --compact tests/Feature/Orders` → **PASS** (38 passed, 75 assertions).
+- `APP_ENV=testing php artisan test --compact tests/Feature/Budgets` → **PASS** (4 passed, 11 assertions, antes de iniciar o ORC-02).
+- `APP_ENV=testing php artisan test --compact` (suíte completa, antes do ORC-02) → **PASS** (111 passed, 4 skipped, 0 failed, 253 assertions).
+- `APP_ENV=testing vendor/bin/phpstan analyse` → **PASS** (0 erros).
+- `./vendor/bin/pint --dirty --test --format agent` → **PASS**.
+- `git diff --check` → **PASS**.
+
+ORC-01 foi confirmado **DONE** com evidência real antes de iniciar o ORC-02.
+
+---
+
+### PARTE 2 — ORC-02 — Orçamento integrado à Ordem de Serviço
+
+#### Estrutura final
+
+Migrations (todas em `database/migrations/2026_09_16_100000_create_budgets_tables.php`, editada nesta sessão pois ainda não havia sido commitada):
+
+- `budget_templates`, `budget_template_items` — inalteradas nesta parte, apenas com o índice curto do ORC-01.1.
+- `budgets` — `order_id` passou a ser **nullable** (antes obrigatório); adicionadas `customer_id` (obrigatória), `company_id` (obrigatória) e `branch_id` (nullable), todas com FK simples e FK composta `(tenant_id, coluna)` para `customers`/`companies`/`branches`, mais índices `(tenant_id, customer_id)` e `(tenant_id, company_id)`.
+- `budget_items` — inalterada nesta parte, além da correção de FK do ORC-01.1.
+
+Models:
+
+- `app/Models/Budget.php` — ganhou `customer_id`, `company_id`, `branch_id` no `$fillable` e nas relações (`customer()`, `company()`, `branch()`). O `booted()` agora: (1) bloqueia alteração direta de `status` fora do `BudgetApprovalService`, no mesmo padrão do `Order`; (2) quando `order_id` está presente, carrega a Order (fonte segura) e **deriva automaticamente** `customer_id`/`company_id`/`branch_id` quando ausentes, e **rejeita** qualquer valor explicitamente conflitante com a Order; (3) valida que `customer_id`, `company_id` e `created_by` pertencem ao tenant atual; (4) valida que `branch_id`, quando presente, pertence à mesma `company_id` e tenant (mesmo padrão do `Order`).
+- `app/Models/BudgetItem.php` — ganhou bloqueio de escrita/remoção quando o Budget pai não está `draft` (`assertBudgetIsEditable`, revisado no ORC-03.1 para delegar a `Budget::canEdit()` e também bloquear itens de orçamentos `sent`, eliminando uma divergência encontrada naquela rodada).
+- `BudgetTemplate`, `BudgetTemplateItem`, enums `BudgetStatus`/`BudgetItemType` — sem alterações; já atendiam integralmente ao ORC-02.
+
+Services:
+
+- `app/Services/BudgetCreationService.php` — reescrito para suportar os cinco cenários do objetivo do ORC-02:
+    - `create(Order, User, items, ...)` — orçamento direto para uma OS (comportamento do ORC-01, preservado).
+    - `createFromTemplate(Order, BudgetTemplate, User, ...)` — aplicar um orçamento pré-definido a uma OS (comportamento do ORC-01, preservado).
+    - `createStandalone(Customer, Company, ?Branch, User, items, ...)` — orçamento manual sem OS.
+    - `createStandaloneFromTemplate(BudgetTemplate, Customer, Company, ?Branch, User, ...)` — orçamento sem OS a partir de um template.
+    - `attachToOrder(Budget, Order, User)` — vincula um orçamento criado sem OS a uma OS existente; sincroniza `company_id`/`branch_id` com a Order (fonte segura) e rejeita `customer_id` divergente.
+    - Extraído `templateItemsPayload()` para não duplicar o mapeamento de itens do template entre os dois fluxos de template.
+- `app/Services/BudgetApprovalService.php` (novo) — máquina de estados explícita para o `Budget` (`draft → sent → approved|rejected`, e `cancelled` a partir de `draft`/`sent`), com `lockForUpdate`, validação de tenant do ator, e, quando o Budget aprovado/rejeitado pertence a uma Order, chama `OrderStatusService::transition()` explicitamente (`budget_generated → budget_approved` / `budget_generated → budget_rejected`). Nenhuma mudança de status ocorre por evento Eloquent.
+- `app/Services/OrderBudgetService.php` (novo no ORC-03, ajustado no ORC-03.1 e novamente auditado no ORC-04) — orquestra o workflow completo Order×Budget sem duplicar as máquinas de estado: `createForOrder()`/`createForOrderFromTemplate()` delegam para `BudgetCreationService`; `send()` compõe `BudgetApprovalService::send()` + `OrderStatusService::transition(..., BUDGET_GENERATED)` numa única transação, com rollback real comprovado por teste; `approve()`/`reject()`/`cancel()` delegam para `BudgetApprovalService`; `reopenAfterRejection(Budget, Order, User)` valida explicitamente tenant, `order_id` e status `rejected` do Budget antes de reabrir a Order.
+
+#### Relação BudgetTemplate → Budget
+
+Mantida a separação conceitual do ORC-01: `BudgetTemplate`/`BudgetTemplateItem` nunca são referenciados pela Order; a materialização copia `type`, `description`, `quantity`, `unit_price`, `discount_amount` e `sort_order` para novas linhas de `BudgetItem`, guardando apenas `source_template_item_id` como rastro de origem. Alteração posterior no template não afeta orçamentos já materializados (validado em teste).
+
+#### Relação Order → Budgets
+
+`Order::budgets()` continua `HasMany` (já existia desde o ORC-01): uma OS pode ter vários orçamentos ao longo do tempo, sem relação 1:1. `Order::latestBudget()` (ORC-03) usa `hasOne(...)->latestOfMany('id')` para retornar deterministicamente o Budget de maior `id` (nunca por timestamp, evitando empates). Todo `Budget` vinculado a uma Order herda automaticamente `customer_id`, `company_id` e `branch_id` da própria Order no momento de salvar, e rejeita qualquer tentativa de gravar esses campos com valor divergente da Order.
+
+#### Ciclo de estados
+
+- **Order** (`OrderStatusService`, inalterado): `open → budget_generated → budget_approved|budget_rejected → ...`.
+- **Budget** (`BudgetApprovalService`): `draft → sent → approved|rejected`; `cancelled` a partir de `draft` ou `sent`; `approved`/`rejected`/`cancelled` são estados finais. A integração Budget→Order ocorre em `send()` (via `OrderBudgetService`, para `budget_generated`) e em `approve()`/`reject()` (via `BudgetApprovalService`, para `budget_approved`/`budget_rejected`) — nunca por evento Eloquent.
+- Itens (`BudgetItem`) tornam-se imutáveis assim que o Budget pai sai de `draft`.
+- Cancelar um Budget nunca move a Order (nem de `draft`, nem de `sent`): comportamento documentado e testado no ORC-03.1.
+
+#### Multitenancy
+
+Todos os pontos exigidos pelo `executar.md` foram cobertos: `Budget`, `BudgetTemplate`, `BudgetItem`, `BudgetTemplateItem`, `Order`, `Customer`, `Company` e `Branch` continuam validando pertencimento ao tenant atual antes de salvar, com FKs compostas `(tenant_id, coluna)` no banco reforçando a mesma regra. `BudgetApprovalService`, `OrderBudgetService` e agora a camada HTTP (`BudgetVisibilityService`, ver ORC-04) rejeitam atores/templates/Budgets/Orders de outro tenant antes de tocar no banco de forma inconsistente.
+
+#### Testes (acumulado ORC-01 → ORC-04)
+
+- `tests/Feature/Budgets/BudgetFoundationTest.php` (ORC-01): calculadora sem float, materialização de template, múltiplos orçamentos por OS com numeração por tenant, rejeição cross-tenant.
+- `tests/Feature/Budgets/BudgetOrderIntegrationTest.php` (ORC-02, ampliado no ORC-03.1): orçamento para OS herda customer/company/branch automaticamente; orçamento criado sem OS e depois vinculado (`attachToOrder`); rejeição ao vincular a uma OS de cliente diferente; rejeição de `customer_id`/`company_id` conflitante gravado diretamente com `order_id` preenchido; orçamento sem OS a partir de template com cópia independente dos itens.
+- `tests/Feature/Budgets/BudgetApprovalTest.php` (ORC-02): aprovação/rejeição movem a Order; itens de orçamento aprovado não podem ser alterados; aprovar direto de `draft` é rejeitado; alteração direta de `status` é rejeitada; ator de outro tenant é rejeitado; cancelamento; orçamento standalone.
+- `tests/Feature/Budgets/OrderBudgetWorkflowTest.php` (ORC-03, ampliado no ORC-03.1): draft/send/approve atômicos; reject + reopen + reorçamento preservando o Budget anterior; standalone approve/reject; cancelamento draft/sent sem alterar Order; itens de Budget `sent` imutáveis; cross-tenant em `createForOrder`/`createForOrderFromTemplate`/`send`; rollback real quando a transição da Order falha; `reopenAfterRejection` rejeita Budget de outra Order, de outro tenant, ou não rejeitado.
+- `tests/Feature/Budgets/OrderLatestBudgetTest.php` (ORC-03): nenhum Budget → null; um Budget → esse; múltiplos → o de maior id.
+- `tests/Feature/Budgets/BudgetHttpTest.php` (ORC-04): camada HTTP completa — ver seção ORC-04 acima.
+
+#### Auditoria de arquitetura (consolidada, ver também ORC-04)
+
+Busca textual por `Budget::create`, `Budget::forceCreate`, `new Budget`, `->status =`, `MAX(`, `max(`, `Order::create`, `Order::forceCreate`, `new Order` em `app/`, `database/factories/`, `database/migrations/`, `routes/`:
+
+- Único `new Budget` fora de testes está em `BudgetCreationService::persist()` — o fluxo oficial.
+- Nenhum `Budget::create`/`Budget::forceCreate` em código operacional (o único `Budget::create(...)` do repositório é um teste negativo, que prova que a proteção de `customer_id`/`company_id` conflitante funciona).
+- Nenhum `->status =` em código operacional.
+- `max(`/`MAX(` só aparece como `->items()->max('sort_order')` (ordenação de exibição de novos itens, ORC-04) — não é numeração transacional.
+- Único `Order::create` continua em `OrderCreationService::create()`.
+
+Nenhum bypass dos serviços oficiais foi encontrado.
+
+#### Estado final (ORC-01 + ORC-02, na época; ver ORC-04 acima para o estado mais atual e completo)
+
+```text
+ORC-01 — DONE
+ORC-02 — DONE
+```
+
+---
+
 ## ORD-08 — Correção de identificadores MySQL
 
 ### ORD-08.3 — Fixtures multitenant da suíte Orders
@@ -236,7 +581,6 @@ Comandos manuais:
     ./vendor/bin/pint --dirty --test --format agent
     git diff --check
 
-
 O executar.md estava diferente e reportava uma falha real no MySQL: o índice automático de order_checklist_items usava o nome order_checklist_items_tenant_id_order_checklist_id_sort_order_index, com 68 caracteres, acima do limite de 64.
 
 O índice foi mantido com as mesmas colunas e recebeu o nome explícito oci_tenant_checklist_sort_idx, curto, legível e sem colisão. Nenhuma funcionalidade ou constraint multitenant foi removida.
@@ -340,19 +684,19 @@ Não foram criados seeders, controllers, UI ou tabelas de histórico/contatos/en
 
 ## Compatibilidade com o legado
 
-| VetorOS 1 | VetorOS 2 | Transformação |
-|---|---|---|
-| customers.cpfcnpj | customers.cpf / customers.cnpj | 11 dígitos para CPF; 14 para CNPJ; remover máscara |
-| customers.birth | customers.birth_date | renomear |
-| customers.zipcode | customers.zip_code | renomear e normalizar |
-| customers.contactname | customers.contact_name | renomear |
-| customers.contactphone | customers.contact_phone | renomear e normalizar |
-| customers.number inteiro | customers.number string | preservar valores como 12A, SN e KM 4 |
-| equipment | equipment_types | transformar categoria em tipo |
-| equipment.equipment_number | equipment_types.equipment_type_number | renomear |
-| equipment.equipment | equipment_types.name | renomear |
-| equipment.chart | equipment_types.uses_chart | renomear |
-| checklists | checklist_templates + itens | substituir estrutura fixa por templates |
+| VetorOS 1                  | VetorOS 2                             | Transformação                                      |
+| -------------------------- | ------------------------------------- | -------------------------------------------------- |
+| customers.cpfcnpj          | customers.cpf / customers.cnpj        | 11 dígitos para CPF; 14 para CNPJ; remover máscara |
+| customers.birth            | customers.birth_date                  | renomear                                           |
+| customers.zipcode          | customers.zip_code                    | renomear e normalizar                              |
+| customers.contactname      | customers.contact_name                | renomear                                           |
+| customers.contactphone     | customers.contact_phone               | renomear e normalizar                              |
+| customers.number inteiro   | customers.number string               | preservar valores como 12A, SN e KM 4              |
+| equipment                  | equipment_types                       | transformar categoria em tipo                      |
+| equipment.equipment_number | equipment_types.equipment_type_number | renomear                                           |
+| equipment.equipment        | equipment_types.name                  | renomear                                           |
+| equipment.chart            | equipment_types.uses_chart            | renomear                                           |
+| checklists                 | checklist_templates + itens           | substituir estrutura fixa por templates            |
 
 O arquivo dump-legado-vetoros1.sql foi usado como referência e confirma os campos legados de customers/equipment. O dump não foi importado e vetoros1 não foi alterado.
 
@@ -441,22 +785,22 @@ Além disso, o Model rejeita uma OS cujo customer_equipment_id pertença a outro
 
 ## Compatibilidade VetorOS 1 → VetorOS 2
 
-| VetorOS 1 | VetorOS 2 | Ação |
-|---|---|---|
-| orders.tenant_id nullable | orders.tenant_id obrigatório | normalizar |
-| orders.customer_id | orders.customer_id | manter, agora obrigatório |
-| orders.equipment_id | orders.customer_equipment_id | substituir pelo equipamento físico do cliente |
-| equipment.equipment_number | equipment_types.equipment_type_number | usar catálogo de tipos |
-| orders.user_id | orders.created_by | renomear semanticamente |
-| técnico implícito/legado | orders.assigned_to | normalizar responsável atual |
-| orders.service_status tinyint | orders.status string/enum | converter semântica legada para estados nomeados |
-| orders.defect | orders.reported_issue | renomear |
-| technician_diagnosis | technical_diagnosis | renomear |
-| technician_solution/services_performed | solution | consolidar no domínio básico |
-| delivery_date | delivered_at | normalizar |
-| order_status_history.status tinyint | from_status/to_status | reconstruir transições |
-| password, accessories, state_conservation | marcos ORD-02+ | não copiar para orders |
-| orçamento, peças, pagamentos, fiscal, garantia e mensagens | marcos futuros | não implementar neste marco |
+| VetorOS 1                                                  | VetorOS 2                             | Ação                                             |
+| ---------------------------------------------------------- | ------------------------------------- | ------------------------------------------------ |
+| orders.tenant_id nullable                                  | orders.tenant_id obrigatório          | normalizar                                       |
+| orders.customer_id                                         | orders.customer_id                    | manter, agora obrigatório                        |
+| orders.equipment_id                                        | orders.customer_equipment_id          | substituir pelo equipamento físico do cliente    |
+| equipment.equipment_number                                 | equipment_types.equipment_type_number | usar catálogo de tipos                           |
+| orders.user_id                                             | orders.created_by                     | renomear semanticamente                          |
+| técnico implícito/legado                                   | orders.assigned_to                    | normalizar responsável atual                     |
+| orders.service_status tinyint                              | orders.status string/enum             | converter semântica legada para estados nomeados |
+| orders.defect                                              | orders.reported_issue                 | renomear                                         |
+| technician_diagnosis                                       | technical_diagnosis                   | renomear                                         |
+| technician_solution/services_performed                     | solution                              | consolidar no domínio básico                     |
+| delivery_date                                              | delivered_at                          | normalizar                                       |
+| order_status_history.status tinyint                        | from_status/to_status                 | reconstruir transições                           |
+| password, accessories, state_conservation                  | marcos ORD-02+                        | não copiar para orders                           |
+| orçamento, peças, pagamentos, fiscal, garantia e mensagens | marcos futuros                        | não implementar neste marco                      |
 
 Os status numéricos observados no legado incluem abertura, cancelamento, orçamento gerado/aprovado/rejeitado, reparo, concluído, não executado, cliente avisado e entregue. A tabela nova preserva esses conceitos com nomes explícitos e não replica os status de agenda.
 
@@ -530,16 +874,16 @@ equipmentAccessories(), equipmentConditions(), checklists() e media().
 
 ## Compatibilidade VetorOS 1 → VetorOS 2
 
-| VetorOS 1 | VetorOS 2 | Ação |
-|---|---|---|
-| orders.accessories | order_equipment_accessories.name/quantity/notes | mover para entidade filha |
-| orders.state_conservation | order_equipment_conditions.description/severity/notes | mover para entidade filha |
-| checklists.checklist | checklist_templates + checklist_template_items | substituir estrutura fixa por template materializado |
-| checklists.equipment_id | checklist_templates.equipment_type_id | normalizar para tipo de equipamento |
-| images.order_id | order_media.order_id | mover para mídia operacional |
-| images.filename | order_media.path/original_name | separar caminho e nome original |
-| orders.password | pendência futura | não copiar nem armazenar em texto puro |
-| technician_checklist_items | order_checklists/order_checklist_items | tratar em checklist operacional futuro |
+| VetorOS 1                  | VetorOS 2                                             | Ação                                                 |
+| -------------------------- | ----------------------------------------------------- | ---------------------------------------------------- |
+| orders.accessories         | order_equipment_accessories.name/quantity/notes       | mover para entidade filha                            |
+| orders.state_conservation  | order_equipment_conditions.description/severity/notes | mover para entidade filha                            |
+| checklists.checklist       | checklist_templates + checklist_template_items        | substituir estrutura fixa por template materializado |
+| checklists.equipment_id    | checklist_templates.equipment_type_id                 | normalizar para tipo de equipamento                  |
+| images.order_id            | order_media.order_id                                  | mover para mídia operacional                         |
+| images.filename            | order_media.path/original_name                        | separar caminho e nome original                      |
+| orders.password            | pendência futura                                      | não copiar nem armazenar em texto puro               |
+| technician_checklist_items | order_checklists/order_checklist_items                | tratar em checklist operacional futuro               |
 
 ## Integridade e isolamento
 
@@ -646,23 +990,23 @@ Essa divergência foi preservada e documentada para evitar uma alteração destr
 
 ## Compatibilidade VetorOS 1 → VetorOS 2
 
-| VetorOS 1 | VetorOS 2 | Transformação |
-|---|---|---|
-| service_status numérico | status string/enum | converter códigos para estados nomeados |
-| 1 — Ordem aberta | open | manter semântica |
-| 2 — Cancelada | cancelled | operação explícita com motivo |
-| 3/4/5 — orçamento | budget_generated/budget_approved/budget_rejected | preservar ciclo sem implementar orçamento |
-| 6 — reparo | in_progress | normalizar |
-| 7 — serviço concluído | completed | separar conclusão técnica de entrega |
-| 8 — não executado | not_executed | manter |
-| 9 — cliente avisado | waiting_customer | organizar como espera |
-| 10 — entregue | delivered | estado final |
-| orders.user_id | orders.created_by | usuário que abriu a OS |
-| responsável técnico legado | orders.assigned_to | responsável atual |
-| technician_diagnosis | technical_diagnosis | renomear |
-| technician_solution/services_performed | solution | consolidar no domínio básico |
-| delivery_date | delivered_at | normalizar |
-| order_status_history.status | from_status/to_status | preservar transições com estados explícitos |
+| VetorOS 1                              | VetorOS 2                                        | Transformação                               |
+| -------------------------------------- | ------------------------------------------------ | ------------------------------------------- |
+| service_status numérico                | status string/enum                               | converter códigos para estados nomeados     |
+| 1 — Ordem aberta                       | open                                             | manter semântica                            |
+| 2 — Cancelada                          | cancelled                                        | operação explícita com motivo               |
+| 3/4/5 — orçamento                      | budget_generated/budget_approved/budget_rejected | preservar ciclo sem implementar orçamento   |
+| 6 — reparo                             | in_progress                                      | normalizar                                  |
+| 7 — serviço concluído                  | completed                                        | separar conclusão técnica de entrega        |
+| 8 — não executado                      | not_executed                                     | manter                                      |
+| 9 — cliente avisado                    | waiting_customer                                 | organizar como espera                       |
+| 10 — entregue                          | delivered                                        | estado final                                |
+| orders.user_id                         | orders.created_by                                | usuário que abriu a OS                      |
+| responsável técnico legado             | orders.assigned_to                               | responsável atual                           |
+| technician_diagnosis                   | technical_diagnosis                              | renomear                                    |
+| technician_solution/services_performed | solution                                         | consolidar no domínio básico                |
+| delivery_date                          | delivered_at                                     | normalizar                                  |
+| order_status_history.status            | from_status/to_status                            | preservar transições com estados explícitos |
 
 Não foram copiados orçamento, peças, pagamentos, fiscal, garantia, mensagens, fotos físicas ou outros módulos futuros para a tabela orders.
 
@@ -813,6 +1157,47 @@ Comandos para validação manual:
     ./vendor/bin/pint --dirty --test --format agent
     git diff --check
 
+---
+
+## ORD-09 — Execução da interface operacional (2026-09-16)
+
+O `executar.md` mudou do fechamento ORC-03.1 para o ORD-09, exigindo a primeira interface operacional de Clientes, Equipamentos e Ordens de Serviço integrada aos Budgets.
+
+### Implementação realizada
+
+- Criadas rotas protegidas por `auth`, `verified`, `current.tenant` e `current.company` para Customers e Orders.
+- Criados `CustomerController`, `CustomerEquipmentController`, `OrderController`, requests de validação e `CustomerEquipmentCreationService`.
+- Customers: listagem com busca backend e paginação, cadastro/edição PF e PJ, detalhe com tabs Geral/Equipamentos/Ordens de Serviço e inativação preservada como decisão futura.
+- Equipamentos: cadastro contextual ao cliente, seleção tenant-safe de `EquipmentType`, numeração via `TenantSequenceService` com chave `customer_equipments` e abertura contextual de OS.
+- Orders: listagem com `OrderVisibilityService`, abertura contextual pelo cliente/equipamento, criação via `OrderCreationService` e detalhe com ligação ao Budget.
+- Adicionadas páginas React/Inertia para Customers e Orders e itens correspondentes ao menu principal.
+- Criado `tests/Feature/CRM/CustomerHttpTest.php` para listagem, busca, criação/normalização e equipamento.
+- A auditoria mantém as invariantes multitenant e não adiciona `company_id`/`branch_id` ao Customer.
+
+### Validações reais
+
+- `APP_ENV=testing php artisan migrate:fresh --force` — BLOQUEADO: MySQL indisponível em `127.0.0.1:3306/vetoros2_test`.
+- CRM — 10 errors de conexão, 0 assertions.
+- Orders — 38 errors de conexão, 0 assertions.
+- Budgets — bloqueado pela mesma conexão indisponível.
+- Suíte completa — bloqueada pela mesma conexão indisponível.
+- `APP_ENV=testing vendor/bin/phpstan analyse --debug` — PASS, 0 erros.
+- `npm run types:check` — PASS.
+- `npm run check` — PASS, sem warnings ou erros.
+- `npm run build` — PASS.
+- `./vendor/bin/pint --dirty --test --format agent` — PASS.
+- `git diff --check` — PASS.
+
+### Estado
+
+```text
+ORD-09 — IMPLEMENTADO, VALIDAÇÃO DE BANCO PENDENTE
+CLIENTS + EQUIPMENT + ORDERS UI — BUILD E TIPOS VERDES
+READY FOR PRÓXIMO MARCO — NÃO DECLARADO
+```
+
+Risco pendente: disponibilizar o MySQL/MariaDB de teste e repetir migration, CRM, Orders, Budgets e suíte completa antes de declarar ORD-09 como concluído.
+
 Não foram declaradas migrations ou testes como verdes sem execução real no MySQL.
 
 ---
@@ -890,10 +1275,10 @@ O executar.md estava diferente do estágio anterior: passou a exigir a separaç�
 - Criada order_assignment_history com from_user_id, to_user_id, changed_by, changed_at e note.
 - O histórico de atribuição é imutável contra update e delete.
 - Criado OrderVisibilityService:
-  - usuário com acesso à matriz vê as OS da própria matriz e de suas unidades;
-  - usuário vinculado à unidade vê somente as OS daquela unidade;
-  - root admin mantém a visibilidade integral dentro do tenant atual;
-  - usuário sem vínculo não recebe OS.
+    - usuário com acesso à matriz vê as OS da própria matriz e de suas unidades;
+    - usuário vinculado à unidade vê somente as OS daquela unidade;
+    - root admin mantém a visibilidade integral dentro do tenant atual;
+    - usuário sem vínculo não recebe OS.
 - Criado OrderAssignmentService com transaction, lockForUpdate, validação de tenant/matriz/unidade e compatibilidade de acesso do técnico.
 - Implementados os fluxos null → técnico A → técnico B → null sem alterar status da OS.
 - A máquina de estados ORD-03 permanece isolada; atribuição não altera status.

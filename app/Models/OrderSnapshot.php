@@ -67,8 +67,10 @@ class OrderSnapshot extends Model
         ]);
     }
 
-    /** @return array<string, mixed> */
-    /** @param array<int, string> $keys */
+    /**
+     * @param  array<int, string>  $keys
+     * @return array<string, mixed>
+     */
     private static function attributes(Model $model, array $keys): array
     {
         return collect($keys)->mapWithKeys(function (string $key) use ($model): array {
